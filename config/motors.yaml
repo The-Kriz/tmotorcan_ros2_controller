@@ -3,13 +3,17 @@ tmotorcan_node:
     num_motors: 2
 
     motor_1:
+      name: "front_left_hip"
       type: "AK60-6"
       id: 1
       kp: 50.0
       kd: 1.0
+      topic_base: "front_left_hip"
 
     motor_2:
-      type: "AK70-10"
+      name: "front_right_hip"
+      type: "AK60-6"
       id: 2
-      kp: 60.0
-      kd: 1.2
+      kp: 50.0
+      kd: 1.0
+      topic_base: "front_right_hip"
