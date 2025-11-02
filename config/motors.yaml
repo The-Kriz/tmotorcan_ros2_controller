@@ -1,0 +1,15 @@
+tmotorcan_node:
+  ros__parameters:
+    num_motors: 2
+
+    motor_1:
+      type: "AK60-6"
+      id: 1
+      kp: 50.0
+      kd: 1.0
+
+    motor_2:
+      type: "AK70-10"
+      id: 2
+      kp: 60.0
+      kd: 1.2
