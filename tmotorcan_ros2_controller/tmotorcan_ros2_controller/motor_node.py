@@ -1,15 +1,27 @@
+#motor_node.py
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.time_source import TimeSource
 from tmotorcan_ros2_controller.mit_can import TMotorManager_mit_can
-from tmotorcan_ros2_controller.msg import MitCommand, MitState
+from tmotorcan_ros2_msgs.msg import MitCommand
+from tmotorcan_ros2_msgs.msg import MitState
+
+
 import time
 import numpy as np
 
 class TMotorNode(Node):
     def __init__(self):
-        super().__init__('tmotorcan_node')
-        self.get_logger().info("Starting TMotor ROS2 Controller Node...")
+        super().__init__('tmotorcan_node', automatically_declare_parameters_from_overrides=False)
 
+        #explicitly declare and set use_sim_time safely
+        self.declare_parameter('use_sim_time', False)
+        use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
+        self._time_source = TimeSource()
+        self._time_source.attach_node(self)
+
+        self.get_logger().info(f"Starting TMotor ROS2 Controller Node (use_sim_time={use_sim_time})...")
         # Detect if parameters are avialble
         params_loaded = len(self.list_parameters([], depth=1).names) > 1
 
@@ -168,14 +180,20 @@ class TMotorNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = TMotorNode()
+    node = None
     try:
+        node = TMotorNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Node initialization failed: {e}")
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
+
+
 
 
 if __name__ == '__main__':
