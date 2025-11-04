@@ -1,199 +1,123 @@
-#motor_node.py
+# motor_node.py
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
-from rclpy.time_source import TimeSource
+from rcl_interfaces.msg import ParameterDescriptor
 from tmotorcan_ros2_controller.mit_can import TMotorManager_mit_can
-from tmotorcan_ros2_msgs.msg import MitCommand
-from tmotorcan_ros2_msgs.msg import MitState
-
+from tmotorcan_ros2_msgs.msg import MitCommand, MitState
 
 import time
 import numpy as np
 
-class TMotorNode(Node):
+class MotorController(Node):
     def __init__(self):
-        super().__init__('tmotorcan_node', automatically_declare_parameters_from_overrides=False)
+        super().__init__("tmotorcan_controller")
 
-        #explicitly declare and set use_sim_time safely
-        self.declare_parameter('use_sim_time', False)
-        use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
-        self._time_source = TimeSource()
-        self._time_source.attach_node(self)
+        # Parameters 
+        self.declare_parameter('num_motors', 1, ParameterDescriptor(
+            description='Number of Motors used'))
+        num_motors = int(self.get_parameter('num_motors').get_parameter_value().integer_value)
+        self.get_logger().info(f"Number of motors: {num_motors}")
 
-        self.get_logger().info(f"Starting TMotor ROS2 Controller Node (use_sim_time={use_sim_time})...")
-        # Detect if parameters are avialble
-        params_loaded = len(self.list_parameters([], depth=1).names) > 1
+        self.declare_parameter('motor_type', 'AK60-6', ParameterDescriptor(
+            description='Default motor model (if not set per-motor)'))
+        self.declare_parameter('motor_kp', 50.0)
+        self.declare_parameter('motor_kd', 1.0)
 
-        #Declare and fetch number of motors in the params file
-        self.declare_parameter('num_motors', 1)
-        num_motors = self.get_parameter('num_motors').get_parameter_value().integer_value
-
+        # Setup motors 
         self.motors = []
-        missing_params = []
+        for i in range(num_motors):
+            ns = f"motor_{i+1}"            # namespace prefix for motors
+            self.declare_parameter(f"{ns}.type", self.get_parameter('motor_type').get_parameter_value().string_value)
+            self.declare_parameter(f"{ns}.id", i + 1)
+            self.declare_parameter(f"{ns}.kp", self.get_parameter('motor_kp').get_parameter_value().double_value)
+            self.declare_parameter(f"{ns}.kd", self.get_parameter('motor_kd').get_parameter_value().double_value)
+            self.declare_parameter(f"{ns}.topic_base", f"motor_{i+1}")
+            self.declare_parameter(f"{ns}.name", f"motor_{i+1}")
 
-        # Load parameters per-motor 
-        for i in range(1, num_motors + 1):
-            ns = f"motor_{i}"
+            motor_type = self.get_parameter(f"{ns}.type").get_parameter_value().string_value
+            motor_id   = int(self.get_parameter(f"{ns}.id").get_parameter_value().integer_value)
+            kp         = float(self.get_parameter(f"{ns}.kp").get_parameter_value().double_value)
+            kd         = float(self.get_parameter(f"{ns}.kd").get_parameter_value().double_value)
+            topic_base = self.get_parameter(f"{ns}.topic_base").get_parameter_value().string_value
+            name       = self.get_parameter(f"{ns}.name").get_parameter_value().string_value
 
-            # Try to fetch required parameters
-            motor_type = self.get_parameter_or(ns + '.type')
-            motor_id   = self.get_parameter_or(ns + '.id')
-            kp         = self.get_parameter_or(ns + '.kp')
-            kd         = self.get_parameter_or(ns + '.kd')
-            topic_base = self.get_parameter_or(ns + '.topic_base') or f'motor_{i}'
-
-            # Collect missing info
-            if None in [motor_type, motor_id, kp, kd]:
-                missing_params.append(ns)
+            # create motor driver using TMotorManager
+            try:
+                driver = TMotorManager_mit_can(motor_type, motor_id)
+                driver.__enter__()
+            except Exception as e:
+                self.get_logger().error(f"Failed to create driver for motor {name} (id={motor_id}): {e}")
+                # skip motor if any error and continue with others (usefull for testing without all motor present)
                 continue
 
-            # Create TMotor CAN driver instance
-            driver = TMotorManager_mit_can(motor_type, motor_id)
-            driver.__enter__()
-
-            pub = self.create_publisher(MitState, f'/{topic_base}/state', 10)
-            sub = self.create_subscription(MitCommand, f'/{topic_base}/command',
-                lambda msg, m_name=topic_base, m_driver=driver: self.cmd_callback(msg, m_name, m_driver),
-                10
-            )
+            # publishers / subscriptions
+            pub = self.create_publisher(MitState, f"/{topic_base}/state", 10)
+            sub = self.create_subscription(MitCommand, f"/{topic_base}/command",
+                lambda msg, m_name=topic_base, m_driver=driver: 
+                self.command_callback(msg, m_name, m_driver), 10 )
 
             motor_cfg = {
-                "serial": i,
-                "type": motor_type,
+                "name": name,
                 "id": motor_id,
+                "type": motor_type,
                 "kp": kp,
                 "kd": kd,
                 "topic_base": topic_base,
                 "pub": pub,
                 "driver": driver
             }
+
             self.motors.append(motor_cfg)
-            self.get_logger().info(f"Loaded motor {i}: {motor_cfg}")
 
-        if missing_params:
-            if params_loaded or num_motors > 1:
-                err_msg = (
-                    f"Missing parameters for: {missing_params}. "
-                    "Please check your YAML file and ensure all fields are defined."
-                )
-                self.get_logger().error(err_msg)
-                raise RuntimeError(err_msg)
-            else:
-                self.get_logger().warn(
-                    "No parameter file detected. Using default motor configuration."
-                )
-                default_driver = TMotorManager_mit_can("AK60-6", 1)
-                default_driver.__enter__()
-                pub = self.create_publisher(MitState, '/motor/state', 10)
-                sub = self.create_subscription(
-                    MitCommand,
-                    '/motor/command',
-                    lambda msg, m_name="motor", m_driver=default_driver: self.cmd_callback(msg, m_name, m_driver),
-                    10
-                )
-                self.motors = [{
-                    "serial": 1,
-                    "type": "AK60-6",
-                    "id": 1,
-                    "kp": 50.0,
-                    "kd": 1.0,
-                    "topic_base": "motor",
-                    "pub": pub,
-                    "driver": default_driver
-                }]
+            self.get_logger().info(f"Initialized motor '{name}' id={motor_id} type={motor_type}"
+                f"Kp={kp} Kd={kd} topic=/{topic_base}")
 
-        # Timer for publishing feedback at 50 Hz
+        # Timer for publishing feedback 
         self.timer = self.create_timer(0.02, self.publish_states)
-        self.get_logger().info(f"Successfully loaded {len(self.motors)} motor configuration(s).")
+        self.get_logger().info(f"Controller ready for {len(self.motors)} motor(s).")
 
-    def get_parameter_or(self, name):
-        """
-        Try to get a parameter. if parameter is missing or fails, return None.
-        """
+    def command_callback(self, msg, motor_id, driver):
+        """Receive MIT-mode command and send to Motor."""
         try:
-            if not self.has_parameter(name):
-                return None
-            p = self.get_parameter(name)
-            v = p.get_parameter_value()
-
-            if isinstance(v.string_value, str) and v.string_value:
-                return v.string_value
-            elif v.integer_value != 0:
-                return v.integer_value
-            elif v.double_value != 0.0:
-                return v.double_value
-            else :
-                return None
-        except Exception:
-            return None
-
-    def cmd_callback(self, msg, motor_name, driver):
-        """
-        Handle incoming MIT command message and send it to the correct motor.
-        """
-        try:
-            self.get_logger().debug(
-                f"[{motor_name}] pos={msg.pos:.3f}, vel={msg.vel:.3f}, kp={msg.kp:.2f}, kd={msg.kd:.2f}, torque={msg.torque:.3f}"
-            )
-
-            # Send MIT-mode command to motor
             driver.set_impedance_gains_real_unit_full_state_feedback(K=msg.kp, B=msg.kd)
             driver.set_output_angle_radians(msg.pos)
             driver.set_output_velocity_radians_per_second(msg.vel)
             driver.set_output_torque_newton_meters(msg.torque)
             driver.update()
-
         except Exception as e:
-            self.get_logger().error(f"Error sending command to {motor_name}: {e}")
+            self.get_logger().error(f"Error sending command to motor {motor_id}: {e}")
 
     def publish_states(self):
-        """
-        Periodically publish state feedback for all motors.
-        """
+        """Read state from all motors and publish feedback."""
         for m in self.motors:
-            driver = m["driver"]
-            pub = m["pub"]
             msg = MitState()
-
+            drv = m["driver"]
             try:
-                msg.position = driver.get_output_angle_radians()
-                msg.velocity = driver.get_output_velocity_radians_per_second()
-                msg.current = driver.get_current_qaxis_amps()
-                msg.temperature = driver.get_temperature_celsius()
-                msg.error = driver.get_motor_error_code()
-                pub.publish(msg)
+                msg.position = drv.get_output_angle_radians()
+                msg.velocity = drv.get_output_velocity_radians_per_second()
+                msg.current = drv.get_current_qaxis_amps()
+                msg.temperature = drv.get_temperature_celsius()
+                msg.error = drv.get_motor_error_code()
+                m["pub"].publish(msg)
             except Exception as e:
-                self.get_logger().warn(f"Failed to read state for {m['topic_base']}: {e}")
+                self.get_logger().warn(f"Read failed for motor {m['id']}: {e}")
 
     def destroy_node(self):
-        """
-        Safely shut down the motors and stop CAN communication.
-        """
-        self.get_logger().info("Shutting down TMotor node...")
+        """Safely shut down motors."""
         for m in self.motors:
             try:
                 m["driver"].__exit__(None, None, None)
             except Exception as e:
-                self.get_logger().warn(f"Error during motor shutdown: {e}")
+                self.get_logger().warn(f"Error closing motor {m['id']}: {e}")
         super().destroy_node()
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = None
-    try:
-        node = TMotorNode()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(f"Node initialization failed: {e}")
-    finally:
-        if node is not None:
-            node.destroy_node()
-        rclpy.shutdown()
 
-
+def main():
+    rclpy.init()
+    node = MotorController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':
